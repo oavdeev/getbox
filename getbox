@@ -121,7 +121,7 @@ CONFIG_SSH_USER = get_config('ssh_user', 'ubuntu')
 CONFIG_SSH_WAIT_TIMEOUT_SECONDS = get_config('ssh_wait_timeout_seconds', 600)
 CONFIG_ROOT_SIZE_GB = get_config('root_size_gb', 32, fromstr=int)
 CONFIG_AMI_ID = get_config('ami_id', '', required=True, guess=guess_ami)       # 16.04
-CONFIG_CUDA_AMI_ID = get_config('cuda_ami_id', 'ami-f1874a89')  # 16.04 + CUDA
+CONFIG_CUDA_AMI_ID = get_config('cuda_ami_id', None)  # 16.04 + CUDA
 CONFIG_SSH_KEY_NAME = get_config('ssh_key_name', '', required=True, guess=guess_keyname)
 CONFIG_IAM_ROLE_ARN = get_config('iam_role_arn', '', required=True)
 CONFIG_SSH_FLAGS = get_config('ssh_flags', '-A')
