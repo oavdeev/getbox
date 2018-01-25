@@ -21,6 +21,40 @@ It also assumes you have ssh key pair used to access EC2 instances in your ssh a
 
 You'll need AWS creds. If you have used awscli on your machine before, you should be good. If not, install awscli and run `aws configure`.
 
+### Permissions
+
+`getbox` requires a few permissions to launch and terminate instances.
+
+Example IAM policy:
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+       {
+            "Effect": "Allow",
+            "Action": [
+                "ec2:AttachVolume",
+                "ec2:CancelSpotInstanceRequests",
+                "ec2:CreateTags",
+                "ec2:DeleteVolume",
+                "ec2:DescribeInstances",
+                "ec2:DescribeKeyPairs",
+                "ec2:DescribeSpotInstanceRequests",
+                "ec2:DescribeSubnets",
+                "ec2:DescribeVolumes",
+                "ec2:ModifyInstanceAttribute",
+                "ec2:RequestSpotInstances",
+                "ec2:RunInstances",
+                "ec2:TerminateInstances"
+            ],
+            "Resource": [
+                "*"
+            ]
+        }
+    ]
+}
+```
+
 ## Magic
 
 Laziest way ever to get an instance in one command:
@@ -80,7 +114,7 @@ You get both the (read) performance and persistence!
 
 There are a couple caveats:
 
-* You cannot choose EBS volume size in this mode; it will be automatically choosen to match ephemeral storage, depending on your instance type.
+* You cannot choose EBS volume size in this mode; it will be automatically choosen to match ephemeral storage, that depends on the instance type.
 * Currently you can only reuse mirrored EBS volume with the same instance type (since ephemeral drives size has to match EBS size).  `getbox` remembers what instance type was used, so you can just run `getbox get <volume-id>` and it will start an instance of the same type and will reassemble RAID array.
 * When first launching the instance in this mode, it will require 10-50 minutes to resync the RAID array; you can use the instance during resync, but read performance will be that of EBS. You can check status of resync by using `mdadm --detail /dev/md0`.
 * Remember that you still need to do `getbox keep` to keep the EBS drive around when instance terminates.
@@ -105,3 +139,4 @@ You can customize some of `getbox` default parameters using JSON config file in 
 | `security_groups` | A list of security group ids to use      |    |
 | `subnets` | A list of subnets to use      |   |
 | `spot_price` | Spot price | `"3.00"`
+| `extra_init_commands` | A list of additional commands to execute on instance initialization |  |
