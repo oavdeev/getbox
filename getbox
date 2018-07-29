@@ -327,6 +327,11 @@ _getbox()
         COMPREPLY=( $(compgen -W "$INSTANCE_TYPES" -- ${cur}) )
         return 0
     fi
+
+    if [ "$prev" == "ssh" ]; then
+        COMPREPLY=( $(getbox ls --names-only --only instances | grep "${cur}") )
+        return 0
+    fi
 } &&
 complete -F _getbox getbox
 """
@@ -360,6 +365,10 @@ def table_row(columns, *args):
         text, width, style = col
         print_(t[:width].ljust(width), end="", style='green')
     print_(' ')
+
+
+def table_footer():
+    print_('')
 
 
 def kill_volume(tags, ebs_id_prefix):
@@ -537,7 +546,7 @@ def format_volume_row(vol):
           state)
 
 
-def list_volumes(tags):
+def list_volumes(tags, names_only=False):
     client = boto3.client('ec2')
 
     response = client.describe_volumes(Filters=[
@@ -545,14 +554,20 @@ def list_volumes(tags):
                           'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
 
     if response['Volumes']:
-        t = volume_table_head()
+        if not names_only:
+            t = volume_table_head()
 
         for vol in response['Volumes']:
             if not tags_match(vol['Tags'], tags):
                 continue
 
-            table_row(t, *format_volume_row(vol))
-        print_("")
+            if not names_only:
+                table_row(t, *format_volume_row(vol))
+            else:
+                print_(format_volume_row(vol)[0], file=sys.stdout)
+
+        if not names_only:
+            table_footer()
 
 
 def ebs_desc(inst, block_device_name='/dev/sdg'):
@@ -592,26 +607,32 @@ def instance_table_row(inst):
             inst['PublicDnsName'])
 
 
-def list_instances(tags, block_device_name='/dev/sdg'):
+def list_instances(tags, block_device_name='/dev/sdg', names_only=False):
     client = boto3.client('ec2')
     response = client.describe_instances(Filters=[
                          {'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
                           'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
 
-    t = instance_table_head()
+    if not names_only:
+        t = instance_table_head()
 
     instances = [inst for rsr in response['Reservations']
                  for inst in rsr['Instances']]
 
     for inst in sorted(instances, key=lambda x: x['LaunchTime']):
-            if not tags_match(inst['Tags'], tags):
-                continue
+        if not tags_match(inst['Tags'], tags):
+            continue
 
-            if inst['State']['Name'] != 'running':
-                continue
+        if inst['State']['Name'] != 'running':
+            continue
 
+        if not names_only:
             table_row(t, *instance_table_row(inst))
-    print_('')
+        else:
+            print_(instance_table_row(inst)[0], file=sys.stdout)
+
+    if not names_only:
+        table_footer()
 
 
 def wait_for_ssh(client, dnsName):
@@ -682,21 +703,21 @@ def get_detached_ebs_vol(client, tags, ebs_id_prefix):
                           'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
 
     for vol in response['Volumes']:
-            if not tags_match(vol['Tags'], tags):
-                continue
+        if not tags_match(vol['Tags'], tags):
+            continue
 
-            if vol['VolumeId'].startswith(ebs_id_prefix):
-                if vol['State'] == 'available':
-                    return vol
-                else:
-                    print_('EBS volume %s exists, but it needs to be detached (currently %s)' % (vol['VolumeId'], vol['State']), style='error')
-                    sys.exit(1)
+        if vol['VolumeId'].startswith(ebs_id_prefix):
+            if vol['State'] == 'available':
+                return vol
+            else:
+                print_('EBS volume %s exists, but it needs to be detached (currently %s)' % (vol['VolumeId'], vol['State']), style='error')
+                sys.exit(1)
     else:
         print_('Couldn\'t find EBS with id %s' % ebs_id_prefix, style='error')
         sys.exit(1)
 
 
-def get_spot(instance_type, tags, ebs_id_prefix, volume_size=None,
+def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
                                                  mirror=None,
                                                  name=None,
                                                  keep=False):
@@ -797,10 +818,14 @@ def get_spot(instance_type, tags, ebs_id_prefix, volume_size=None,
             launchSpec['BlockDeviceMappings'] = []
 
         launchSpec['BlockDeviceMappings'].append({
-                'DeviceName': drive_names[n],
-                'VirtualName': 'ephemeral%d' % n
-            })
+            'DeviceName': drive_names[n],
+            'VirtualName': 'ephemeral%d' % n
+        })
 
+    do_get_spot(client, launchSpec, tags, name, ebs_vol_id, mirror, instance_type)
+
+
+def do_get_spot(client, launchSpec, tags, name, ebs_vol_id, mirror, instance_type):
     response = client.request_spot_instances(
         DryRun=False,
         SpotPrice=str(CONFIG_SPOT_PRICE),
@@ -1032,6 +1057,8 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--mirror', help='mirror mode', action='store_true', default=None)
     parser.add_argument('--name', help='name', type=str)
+    parser.add_argument('--only', help='list objects', type=str, default='')
+    parser.add_argument('--names-only', help='list only object names', action='store_true', default=False)
     parser.add_argument('cmd', type=str, nargs='?')
     parser.add_argument('args', nargs='*')
     parser.print_usage = print_usage
@@ -1068,7 +1095,7 @@ def main():
                     print_('Unknown option: %s' % a, style='error')
                     sys.exit(1)
 
-        get_spot(type_, get_tags(), vol_prefix,
+        get_inst(type_, get_tags(), vol_prefix,
                  volume_size=volume_size,
                  mirror=p.mirror, name=p.name,
                  keep=keep)
@@ -1115,8 +1142,14 @@ def main():
             keep_ebs(get_tags(), p.args[0], False)
     elif p.cmd in ('list', 'ls'):
         check_creds()
-        list_instances(get_tags())
-        list_volumes(get_tags())
+        if p.only:
+            obj_types = p.only.split(',')
+        else:
+            obj_types = ('instances', 'volumes')
+        if 'instances' in obj_types:
+            list_instances(get_tags(), names_only=p.names_only)
+        if 'volumes' in obj_types:
+            list_volumes(get_tags(), names_only=p.names_only)
     else:
         print_usage()
 
