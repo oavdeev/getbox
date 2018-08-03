@@ -9,15 +9,25 @@ In a nutshell:
 
 ## Installation:
 
+### From pypi
+
+```bash
+pip3 install getbox
+```
+
+### Manual
+
 The only dependency is `boto3`, you probably already have it. If not you can install it using `pip install boto3` . After that do:
 
-```
-python getbox install
+```bash
+python3 getbox install
 ```
 
 That will install the binary to `/usr/local/bin` and will try to install bash completions as well.
 
-It also assumes you have ssh key pair used to access EC2 instances in your ssh agent.
+### Authentication
+
+It assumes you have ssh key pair used to access EC2 instances in your ssh agent.
 
 You'll need AWS creds. If you have used awscli on your machine before, you should be good. If not, install awscli and run `aws configure`.
 
@@ -26,7 +36,8 @@ You'll need AWS creds. If you have used awscli on your machine before, you shoul
 `getbox` requires a few permissions to launch and terminate instances.
 
 Example IAM policy:
-```
+
+```json
 {
     "Version": "2012-10-17",
     "Statement": [

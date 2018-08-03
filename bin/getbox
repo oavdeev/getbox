@@ -69,14 +69,14 @@ def get_config(k, defaultval, fromstr=str, required=False, guess=lambda: ''):
         res = _config.get(k, defaultval)
 
     if required and not res:
-        print("%s not set" % k)
         g = guess()
-        s = raw_input('Please input %s [%s]> ' % (k, g))
+        s = raw_input('Required config parameter %s not set. Please input %s [%s]> ' % (k, k, g))
         if g and not s.strip():
             res = fromstr(g)
         else:
             res = fromstr(s)
         if not res:
+            print_("%s is required, exiting" % k)
             sys.exit(1)
         _config[k] = res
 
@@ -105,7 +105,7 @@ def guess_ami():
                                              {'Name':'virtualization-type', 'Values':['hvm']},
                                              {'Name':'root-device-type', 'Values':['ebs']},
                                              {'Name':'sriov-net-support', 'Values':['simple']}])['Images']
-    candidates = [i for i in images if i['Name'].startswith('ubuntu/images/hvm-ssd/ubuntu-zesty-17.04-amd64-server-')]
+    candidates = [i for i in images if i['Name'].startswith('ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-')]
     return max(candidates, key=lambda x:x['CreationDate'])['ImageId']
 
 def subnets_fromstr(s):
@@ -119,9 +119,9 @@ CONFIG_EXTRA_TAGS = get_config('extra_tags', {})
 CONFIG_OWNER_TAG_NAME = get_config('owner_tag_name', 'owner')
 CONFIG_SSH_USER = get_config('ssh_user', 'ubuntu')
 CONFIG_SSH_WAIT_TIMEOUT_SECONDS = get_config('ssh_wait_timeout_seconds', 600)
-CONFIG_ROOT_SIZE_GB = get_config('root_size_gb', 32, fromstr=int)
-CONFIG_AMI_ID = get_config('ami_id', '', required=True, guess=guess_ami)       # 16.04
-CONFIG_CUDA_AMI_ID = get_config('cuda_ami_id', None)  # 16.04 + CUDA
+CONFIG_ROOT_SIZE_GB = get_config('root_size_gb', 80, fromstr=int)
+CONFIG_AMI_ID = get_config('ami_id', '', required=True, guess=guess_ami)
+CONFIG_CUDA_AMI_ID = get_config('cuda_ami_id', None)
 CONFIG_SSH_KEY_NAME = get_config('ssh_key_name', '', required=True, guess=guess_keyname)
 CONFIG_IAM_ROLE_ARN = get_config('iam_role_arn', '', required=True)
 CONFIG_SSH_FLAGS = get_config('ssh_flags', '-A')
@@ -139,6 +139,11 @@ def maybe_save_config():
         print_("Saving config to %s" % config_path)
         with open(config_path, 'w') as f:
             json.dump(_config, f)
+    else:
+        print_("Overwrite config at %s? [y/N] " % config_path, end='')
+        if raw_input('') in ('Y', 'y'):
+            with open(config_path, 'w') as f:
+                json.dump(_config, f)
 
 maybe_save_config()
 
