@@ -4,7 +4,7 @@ from setuptools import setup
 
 setup(
     name='getbox',
-    version='0.7.6',
+    version='0.7.7',
     scripts=['bin/getbox'],
     author='Oleg Avdeev',
     author_email='feedback@instaguide.io',
