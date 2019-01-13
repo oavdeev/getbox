@@ -106,12 +106,22 @@ def guess_keyname():
 def guess_ami():
     client = boto3.client('ec2')
     images = client.describe_images(Owners=['099720109477'],
-                                    Filters=[{'Name':'architecture', 'Values':['x86_64']},
-                                             {'Name':'virtualization-type', 'Values': ['hvm']},
-                                             {'Name':'root-device-type', 'Values': ['ebs']},
-                                             {'Name':'sriov-net-support', 'Values': ['simple']}])['Images']
+                                    Filters=[{'Name': 'architecture', 'Values': ['x86_64']},
+                                             {'Name': 'virtualization-type', 'Values': ['hvm']},
+                                             {'Name': 'root-device-type', 'Values': ['ebs']},
+                                             {'Name': 'sriov-net-support', 'Values': ['simple']}])['Images']
     candidates = [i for i in images if i['Name'].startswith('ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-')]
-    return max(candidates, key=lambda x:x['CreationDate'])['ImageId']
+    return max(candidates, key=lambda x: x['CreationDate'])['ImageId']
+
+
+def get_latest_dlami_id():
+    client = boto3.client('ec2')
+    images = client.describe_images(Owners=['898082745236'],
+                                    Filters=[{'Name': 'architecture', 'Values': ['x86_64']},
+                                             {'Name': 'virtualization-type', 'Values': ['hvm']},
+                                             {'Name': 'root-device-type', 'Values': ['ebs']}])['Images']
+    candidates = [i for i in images if 'Ubuntu' in i['Name']]
+    return max(candidates, key=lambda x: x['CreationDate'])['ImageId']
 
 
 def subnets_fromstr(s):
@@ -187,20 +197,22 @@ c1.medium 350/1;c1.xlarge 1680/4;c3.2xlarge 160/2;c3.4xlarge 320/2;c3.8xlarge
 0;t2.small 0;t2.xlarge 0;x1.16xlarge 1920/1;x1.32xlarge 3840/2;x1e.16xlarge
 1920/1;x1e.2xlarge 240/1;x1e.32xlarge 3840/2;x1e.4xlarge 480/1;x1e.8xlarge
 960/1;x1e.xlarge 120/1;z1d.12xlarge 1800/2;z1d.2xlarge 300/1;z1d.3xlarge
-450/1;z1d.6xlarge 900/1;z1d.large 75/1;z1d.xlarge 150/1;
+450/1;z1d.6xlarge 900/1;z1d.large 75/1;z1d.xlarge 150/1
 """
 
 
 def get_ami_id(instance_type):
-    if instance_type.startswith('g2.') and CONFIG_CUDA_AMI_ID:
-        return CONFIG_CUDA_AMI_ID
-    if instance_type.startswith('g3.') and CONFIG_CUDA_AMI_ID:
-        return CONFIG_CUDA_AMI_ID
-    if instance_type.startswith('p2.') and CONFIG_CUDA_AMI_ID:
-        return CONFIG_CUDA_AMI_ID
-    if instance_type.startswith('p3.') and CONFIG_CUDA_AMI_ID:
-        return CONFIG_CUDA_AMI_ID
-    return CONFIG_AMI_ID
+    if instance_type.split('.')[0] in ('g2', 'g3', 'p2', 'p3'):
+        if CONFIG_CUDA_AMI_ID:
+            if CONFIG_CUDA_AMI_ID.lower() in ('dlami', 'latest_dlami'):
+                return get_latest_dlami_id()
+            else:
+                return CONFIG_CUDA_AMI_ID
+    else:
+        if CONFIG_AMI_ID.lower() in ('dlami', 'latest_dlami'):
+            return get_latest_dlami_id()
+        else:
+            return CONFIG_AMI_ID
 
 
 def all_instance_types():
@@ -416,8 +428,11 @@ def find_instance(client, tags, partId):
     client = boto3.client('ec2')
 
     response = client.describe_instances(Filters=[
-                         {'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-                          'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
+        {
+            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
+            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+        }
+    ])
 
     for rsr in response['Reservations']:
         for inst in rsr['Instances']:
@@ -475,12 +490,19 @@ def rename_instance(tags, partId, name):
         sys.exit(1)
 
 
+def get_instance_ssh_address(inst):
+    return inst['PublicDnsName'] or inst['PrivateIpAddress']
+
+
 def ssh(tags, partId):
     client = boto3.client('ec2')
 
     response = client.describe_instances(Filters=[
-                         {'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-                          'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
+        {
+            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
+            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+        }
+    ])
 
     for rsr in response['Reservations']:
         for inst in rsr['Instances']:
@@ -493,7 +515,7 @@ def ssh(tags, partId):
             name = instance_name(inst)
 
             if partId in inst['InstanceId'] or (name and partId in name):
-                dns = inst['PublicDnsName']
+                dns = get_instance_ssh_address(inst)
                 key = inst['KeyName']
                 try:
                     keys = subprocess.check_output(["ssh-add", "-l"]).decode().splitlines()
@@ -519,30 +541,39 @@ def tags_match(Tags, tagdict):
     return tt == tagdict
 
 
-def keep_ebs(tags, ebs_id_prefix, keep=True, block_device_name='/dev/sdg'):
+def keep_ebs(tags, ebs_id_prefixes, keep=True):
+    not_found = set(ebs_id_prefixes)
+
     client = boto3.client('ec2')
     response = client.describe_volumes(Filters=[
-                         {'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-                          'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
+        {
+            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
+            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+        }
+    ])
 
     for vol in response['Volumes']:
         if not tags_match(vol['Tags'], tags):
             continue
-        if vol['VolumeId'].startswith(ebs_id_prefix):
-            for a in vol['Attachments']:
-                client.modify_instance_attribute(InstanceId=a['InstanceId'],
-                                                 Attribute='blockDeviceMapping',
-                                                 BlockDeviceMappings=[{
-                                                    'DeviceName': block_device_name,
-                                                    'Ebs': {'DeleteOnTermination': not keep}
-                                                 }])
-            if keep:
-                print_("Volume %s will be kept around after instance termination" % vol['VolumeId'])
-            else:
-                print_("Volume %s will be deleted after instance termination" % vol['VolumeId'])
-            break
-    else:
-        print_('Couldn\'t find attached EBS with id %s' % ebs_id_prefix, style='error')
+        for pref in ebs_id_prefixes:
+            if vol['VolumeId'].startswith(pref):
+                not_found.remove(pref)
+
+                for a in vol['Attachments']:
+                    client.modify_instance_attribute(InstanceId=a['InstanceId'],
+                                                     Attribute='blockDeviceMapping',
+                                                     BlockDeviceMappings=[
+                                                     {
+                                                         'DeviceName': a['Device'],
+                                                         'Ebs': {'DeleteOnTermination': not keep}
+                                                     }])
+                if keep:
+                    print_("Volume %s will be kept around after instance termination" % vol['VolumeId'])
+                else:
+                    print_("Volume %s will be deleted after instance termination" % vol['VolumeId'])
+
+    if not_found:
+        print_('Couldn\'t find attached EBS with id %s' % repr(not_found), style='error')
         sys.exit(1)
 
 
@@ -564,19 +595,22 @@ def format_volume_row(vol):
         state = vol['State']
 
     return (
-          vol['VolumeId'],
-          str(vol['Size']),
-          vol['VolumeType'],
-          'No' if not delete_on_term else 'Yes',
-          state)
+        vol['VolumeId'],
+        str(vol['Size']),
+        vol['VolumeType'],
+        'No' if not delete_on_term else 'Yes',
+        state
+    )
 
 
 def list_volumes(tags, names_only=False):
     client = boto3.client('ec2')
 
     response = client.describe_volumes(Filters=[
-                         {'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-                          'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
+        {
+            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
+            'Values': [tags[CONFIG_OWNER_TAG_NAME]]}
+    ])
 
     if response['Volumes']:
         if not names_only:
@@ -615,7 +649,7 @@ def instance_table_head():
                       ('Type', 10, None),
                       ('Started', 18, None),
                       ('EBS', 30, None),
-                      ('DnsName', 53, None))
+                      ('Address', 53, None))
 
 
 def instance_name(inst):
@@ -629,14 +663,17 @@ def instance_table_row(inst):
             inst['InstanceType'],
             inst['LaunchTime'].strftime('%Y-%m-%d %H:%M'),
             ebs_desc(inst),
-            inst['PublicDnsName'])
+            get_instance_ssh_address(inst))
 
 
 def list_instances(tags, block_device_name='/dev/sdg', names_only=False):
     client = boto3.client('ec2')
     response = client.describe_instances(Filters=[
-                         {'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-                          'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
+        {
+            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
+            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+        }
+    ])
 
     if not names_only:
         t = instance_table_head()
@@ -704,7 +741,7 @@ def wait_for_init(client, instanceId):
                     break
                 elif st == 'running':
                     spin.done()
-                    return inst['PublicDnsName']
+                    return get_instance_ssh_address(inst)
                 elif st == 'terminated':
                     spin.done("failed")
                     sys.exit(1)
@@ -715,8 +752,11 @@ def wait_for_init(client, instanceId):
 
 def get_detached_ebs_vol(client, tags, ebs_id_prefix):
     response = client.describe_volumes(Filters=[
-                         {'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-                          'Values': [tags[CONFIG_OWNER_TAG_NAME]]}])
+        {
+            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
+            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+        }
+    ])
 
     for vol in response['Volumes']:
         if not tags_match(vol['Tags'], tags):
@@ -734,9 +774,7 @@ def get_detached_ebs_vol(client, tags, ebs_id_prefix):
 
 
 def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
-                                                 mirror=None,
-                                                 name=None,
-                                                 keep=False):
+             mirror=None, name=None, keep=False, root_ebs_id=None):
     client = boto3.client('ec2')
 
     if ebs_id_prefix:
@@ -759,21 +797,25 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
         print_("Using default instance type %s" % instance_type)
 
     launchSpec = {
-            'ImageId': get_ami_id(instance_type),
-            'KeyName': CONFIG_SSH_KEY_NAME,
-            'InstanceType': instance_type,
-            'SubnetId': random.choice(list(CONFIG_SUBNETS.values())),
-            'EbsOptimized': is_ebs_optimized_type(instance_type),
-            'IamInstanceProfile': {
-                'Arn': CONFIG_IAM_ROLE_ARN,
-            },
-            'Monitoring': {
-                'Enabled': True
-            },
-            'SecurityGroupIds': CONFIG_SECURITY_GROUPS
-        }
+        'ImageId': get_ami_id(instance_type),
+        'KeyName': CONFIG_SSH_KEY_NAME,
+        'InstanceType': instance_type,
+        'SubnetId': random.choice(list(CONFIG_SUBNETS.values())),
+        'EbsOptimized': is_ebs_optimized_type(instance_type),
+        'IamInstanceProfile': {
+            'Arn': CONFIG_IAM_ROLE_ARN,
+        },
+        'Monitoring': {
+            'Enabled': True
+        },
+        'SecurityGroupIds': CONFIG_SECURITY_GROUPS
+    }
 
-    size_e, num_e = get_ephemeral_info(instance_type)
+    try:
+        size_e, num_e = get_ephemeral_info(instance_type)
+    except KeyError:
+        print_("Unknown instance type: %s" % (instance_type,), style='error')
+        sys.exit(1)
 
     if mirror:
         if volume_size is not None:
@@ -787,7 +829,15 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
         volume_size = size_e
 
     def build_userdata(init):
-        return base64.b64encode((init + "\n" + "\n".join(CONFIG_EXTRA_INIT_COMMANDS)).encode()).decode()
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        combined_message = MIMEMultipart()
+        contents = (init + "\n" + "\n".join(CONFIG_EXTRA_INIT_COMMANDS)).encode()
+        filename = 'init.sh'
+        sub_message = MIMEText(contents, 'text/x-shellscript', sys.getdefaultencoding())
+        sub_message.add_header('Content-Disposition', 'attachment; filename="%s"' % (filename,))
+        combined_message.attach(sub_message)
+        return str(combined_message)
 
     if ebs_id_prefix:
         # attach existing
@@ -801,15 +851,15 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
         init = EBS_MIRROR_INIT if mirror else EBS_FORMAT_INIT
         launchSpec['UserData'] = build_userdata(init)
         launchSpec['BlockDeviceMappings'] = [
-                {
-                    'DeviceName': '/dev/sdg',
-                    'Ebs': {
-                        'VolumeSize': volume_size or 100,
-                        'DeleteOnTermination': not keep,
-                        'VolumeType': CONFIG_EBS_VOLTYPE
-                    }
+            {
+                'DeviceName': '/dev/sdg',
+                'Ebs': {
+                    'VolumeSize': volume_size or 100,
+                    'DeleteOnTermination': not keep,
+                    'VolumeType': CONFIG_EBS_VOLTYPE
                 }
-            ]
+            }
+        ]
 
         if CONFIG_EBS_IOPS:
             launchSpec['BlockDeviceMappings'][0]['Ebs']['Iops'] = CONFIG_EBS_IOPS
@@ -822,12 +872,12 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
 
     # root volume
     launchSpec['BlockDeviceMappings'].append({
-            'DeviceName': '/dev/sda1',
-            'Ebs': {'VolumeSize': CONFIG_ROOT_SIZE_GB,
-                    'DeleteOnTermination': True,
-                    'VolumeType': 'gp2'
-                    }
-        })
+        'DeviceName': '/dev/sda1',
+        'Ebs': {'VolumeSize': CONFIG_ROOT_SIZE_GB,
+                'DeleteOnTermination': True,
+                'VolumeType': 'gp2'
+                }
+    })
 
     for n in range(num_e):
         if 'BlockDeviceMappings' not in launchSpec:
@@ -940,7 +990,7 @@ def print_usage(f=sys.stdout):
 
     print_(" " * (86) + "(Example)")
 
-    cmd("get",  "Get an ec2 instance and ssh into it.", "getbox get r3.8xlarge")
+    cmd("get", "Get an ec2 instance and ssh into it.", "getbox get r3.8xlarge")
     cmd("", "...optionally, pass EBS volume id to attach.", "getbox get vol-321")
     cmd("", "...or both", "getbox get r3.8xlarge vol-321")
     cmd("", "...you can also name it", "getbox get r3.8xlarge --name mytestbox")
@@ -948,7 +998,7 @@ def print_usage(f=sys.stdout):
     cmd("list", "List your instances and volumes", "getbox list")
     cmd("kill", "Kill an instance or (unattached) volume", "getbox kill 123")
     cmd("", "", "getbox kill vol-456")
-    cmd("ssh",  "Log into the instance (uses utility1 key)", "getbox ssh 123")
+    cmd("ssh", "Log into the instance", "getbox ssh 123")
     cmd("keep", "Disable delete-on-termination on an attached EBS volume", "getbox keep vol-123")
     cmd("unkeep", "Enable delete-on-termination on an attached EBS volume", "getbox unkeep vol-123")
     cmd("rename", "(Re)name an instance", "getbox rename i-123 mytestbox")
@@ -1040,6 +1090,7 @@ def parse_size(s):
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--mirror', help='mirror mode', action='store_true', default=None)
+    parser.add_argument('--root', help='root volume id', type=str)
     parser.add_argument('--name', help='name', type=str)
     parser.add_argument('--only', help='list objects', type=str, default='')
     parser.add_argument('--names-only', help='list only object names', action='store_true', default=False)
@@ -1111,18 +1162,18 @@ def main():
                 kill_volume(get_tags(), vol_prefix)
     elif p.cmd == 'keep':
         check_creds()
-        if len(p.args) != 1:
+        if len(p.args) < 1:
             print_('Usage: keep <ebs-id>', style='error')
             sys.exit(1)
         else:
-            keep_ebs(get_tags(), p.args[0], True)
+            keep_ebs(get_tags(), p.args[0:], True)
     elif p.cmd in ('unkeep', 'dontkeep'):
         check_creds()
-        if len(p.args) != 1:
+        if len(p.args) < 1:
             print_('Usage: unkeep <ebs-id>', style='error')
             sys.exit(1)
         else:
-            keep_ebs(get_tags(), p.args[0], False)
+            keep_ebs(get_tags(), p.args[0:], False)
     elif p.cmd in ('list', 'ls'):
         check_creds()
         if p.only:
