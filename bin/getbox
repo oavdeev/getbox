@@ -7,7 +7,6 @@ import getpass
 import shutil
 import random
 import socket
-import base64
 import errno
 import boto3
 import time
@@ -37,11 +36,6 @@ def print_(msg, file=sys.stderr, style=None, end="\n"):
         print(msg, file=file, end=end)
 
 
-_config = None
-_config_updated = False
-_args_config = None
-
-
 def get_argv_config_dict():
     res = {}
     for item in sys.argv:
@@ -51,38 +45,8 @@ def get_argv_config_dict():
     return res
 
 
-def get_config(k, defaultval, fromstr=str, required=False, guess=lambda: ''):
-    global _config, _args_config, _config_updated
-
-    if _config is None:
-        config_path = os.path.expanduser("~/.getbox")
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                _config = json.loads(f.read())
-        else:
-            _config = {}
-
-        _args_config = get_argv_config_dict()
-
-    if k in _args_config:
-        res = fromstr(_args_config[k])
-    else:
-        res = _config.get(k, defaultval)
-
-    if required and not res:
-        g = guess()
-        s = raw_input('Required config parameter %s not set. Please input %s [%s]> ' % (k, k, g))
-        if g and not s.strip():
-            res = fromstr(g)
-        else:
-            res = fromstr(s)
-        if not res:
-            print_("%s is required, exiting" % k)
-            sys.exit(1)
-        _config[k] = res
-        _config_updated = True
-
-    return res
+def get_account_id():
+    return boto3.client('sts').get_caller_identity()['Account']
 
 
 def guess_subnets():
@@ -132,39 +96,129 @@ def subnets_fromstr(s):
     return res
 
 
-CONFIG_EXTRA_TAGS = get_config('extra_tags', {})
-CONFIG_OWNER_TAG_NAME = get_config('owner_tag_name', 'owner')
-CONFIG_SSH_USER = get_config('ssh_user', 'ubuntu')
-CONFIG_SSH_WAIT_TIMEOUT_SECONDS = get_config('ssh_wait_timeout_seconds', 600)
-CONFIG_ROOT_SIZE_GB = get_config('root_size_gb', 80, fromstr=int)
-CONFIG_AMI_ID = get_config('ami_id', '', required=True, guess=guess_ami)
-CONFIG_CUDA_AMI_ID = get_config('cuda_ami_id', None)
-CONFIG_SSH_KEY_NAME = get_config('ssh_key_name', '', required=True, guess=guess_keyname)
-CONFIG_IAM_ROLE_ARN = get_config('iam_role_arn', '', required=True)
-CONFIG_SSH_FLAGS = get_config('ssh_flags', '-A')
-CONFIG_SUBNETS = get_config('subnets', {}, required=True, guess=guess_subnets, fromstr=subnets_fromstr)
-CONFIG_SECURITY_GROUPS = get_config('security_groups', [])
-CONFIG_SPOT_PRICE = get_config('spot_price', None)
-CONFIG_EBS_IOPS = get_config('ebs_iops', None, int)
-CONFIG_EBS_VOLTYPE = get_config('ebs_volume_type', 'gp2')
-CONFIG_EXTRA_INIT_COMMANDS = get_config('extra_init_commands', [])
+class Config:
+    def __init__(self):
+        self._config = None
+        self._config_updated = False
+        self._args_config = None
 
+    def validate(self):
+        for k in dir(self):
+            if k.upper() == k:
+                getattr(self, k)()
 
-def maybe_save_config():
-    global _config, _config_updated
-    config_path = os.path.expanduser("~/.getbox")
-    if not os.path.exists(config_path):
-        print_("Saving config to %s" % config_path)
-        with open(config_path, 'w') as f:
-            json.dump(_config, f)
-    elif _config_updated:
-        print_("Overwrite config at %s? [y/N] " % config_path, end='')
-        if raw_input('') in ('Y', 'y'):
+    def get_config(self, k, defaultval, fromstr=str, required=False, guess=lambda: ''):
+        if self._config is None:
+            config_path = os.path.expanduser("~/.getbox")
+            if os.path.exists(config_path):
+                with open(config_path) as f:
+                    _config_json = json.loads(f.read())
+                    # If config is a list, we got a per-account setup here
+                    if isinstance(_config_json, list):
+                        current_profile = None
+                        current_account_id = get_account_id()
+                        for profile in _config_json:
+                            if not profile.get('account_id') and current_profile is None:
+                                current_profile = profile
+                            elif profile.get('account_id') == current_account_id:
+                                current_profile = profile
+                                break
+                        if current_profile is None:
+                            print_('Cannot find config profile for account id {}'.format(current_account_id), style='error')
+                            sys.exit(1)
+                        self._config = current_profile
+                    else:
+                        self._config = _config_json
+            else:
+                self._config = {}
+
+            self._args_config = get_argv_config_dict()
+
+        if k in self._args_config:
+            res = fromstr(self._args_config[k])
+        else:
+            res = self._config.get(k, defaultval)
+
+        if required and not res:
+            g = guess()
+            s = raw_input('Required config parameter %s not set. Please input %s [%s]> ' % (k, k, g))
+            if g and not s.strip():
+                res = fromstr(g)
+            else:
+                res = fromstr(s)
+            if not res:
+                print_("%s is required, exiting" % k)
+                sys.exit(1)
+            self._config[k] = res
+            self._config_updated = True
+
+        return res
+
+    def EXTRA_TAGS(self):
+        return self.get_config('extra_tags', {})
+
+    def OWNER_TAG_NAME(self):
+        return self.get_config('owner_tag_name', 'owner')
+
+    def OWNER(self):
+        return self.get_config('owner', None)
+
+    def SSH_USER(self):
+        return self.get_config('ssh_user', 'ubuntu')
+
+    def SSH_WAIT_TIMEOUT_SECONDS(self):
+        return self.get_config('ssh_wait_timeout_seconds', 600)
+
+    def ROOT_SIZE_GB(self):
+        return self.get_config('root_size_gb', 80, fromstr=int)
+
+    def AMI_ID(self):
+        return self.get_config('ami_id', '', required=True, guess=guess_ami)
+
+    def CUDA_AMI_ID(self):
+        return self.get_config('cuda_ami_id', None)
+
+    def SSH_KEY_NAME(self):
+        return self.get_config('ssh_key_name', '', required=True, guess=guess_keyname)
+
+    def IAM_ROLE_ARN(self):
+        return self.get_config('iam_role_arn', '', required=True)
+
+    def SSH_FLAGS(self):
+        return self.get_config('ssh_flags', '-A')
+
+    def SUBNETS(self):
+        return self.get_config('subnets', {}, required=True, guess=guess_subnets, fromstr=subnets_fromstr)
+
+    def SECURITY_GROUPS(self):
+        return self.get_config('security_groups', [])
+
+    def SPOT_PRICE(self):
+        return self.get_config('spot_price', None)
+
+    def EBS_IOPS(self):
+        return self.get_config('ebs_iops', None, int)
+
+    def EBS_VOLTYPE(self):
+        return self.get_config('ebs_volume_type', 'gp2')
+
+    def EXTRA_INIT_COMMANDS(self):
+        return self.get_config('extra_init_commands', [])
+
+    def maybe_save(self):
+        config_path = os.path.expanduser("~/.getbox")
+        if not os.path.exists(config_path):
+            print_("Saving config to %s" % config_path)
             with open(config_path, 'w') as f:
-                json.dump(_config, f)
+                json.dump(self._config, f)
+        elif self._config_updated:
+            print_("Overwrite config at %s? [y/N] " % config_path, end='')
+            if raw_input('') in ('Y', 'y'):
+                with open(config_path, 'w') as f:
+                    json.dump(self._config, f)
 
 
-maybe_save_config()
+config = Config()
 
 #
 # Generated with
@@ -203,16 +257,16 @@ c1.medium 350/1;c1.xlarge 1680/4;c3.2xlarge 160/2;c3.4xlarge 320/2;c3.8xlarge
 
 def get_ami_id(instance_type):
     if instance_type.split('.')[0] in ('g2', 'g3', 'p2', 'p3'):
-        if CONFIG_CUDA_AMI_ID:
-            if CONFIG_CUDA_AMI_ID.lower() in ('dlami', 'latest_dlami'):
+        if config.CUDA_AMI_ID():
+            if config.CUDA_AMI_ID().lower() in ('dlami', 'latest_dlami'):
                 return get_latest_dlami_id()
             else:
-                return CONFIG_CUDA_AMI_ID
+                return config.CUDA_AMI_ID()
     else:
-        if CONFIG_AMI_ID.lower() in ('dlami', 'latest_dlami'):
+        if config.AMI_ID().lower() in ('dlami', 'latest_dlami'):
             return get_latest_dlami_id()
         else:
-            return CONFIG_AMI_ID
+            return config.AMI_ID()
 
 
 def all_instance_types():
@@ -240,23 +294,25 @@ test -e /etc/apt/apt.conf.d/10periodic && echo 'APT::Periodic::Unattended-Upgrad
 
 umount /media/ephemeral{0..29} 2>&1 || true
 
-EPHEMERALS=`curl http://169.254.169.254/latest/meta-data/block-device-mapping/ | grep ephemeral || true`
+ROOT_DEVICE=$(df -P / | tail -n 1 | awk '/.*/ { print $1 }')
+declare -a EBS EPHEMERAL_DEVICES
 
-EPHEMERAL_DEVICES=''
-for d in $EPHEMERALS ; do
-    path=`curl -w "\n" http://169.254.169.254/latest/meta-data/block-device-mapping/$d 2>/dev/null | sed -e 's|^sd|/dev/xvd|'`
-    if [ -e "$path" ]; then
-        EPHEMERAL_DEVICES+=" $path"
-    else
-        path=$(echo $d | sed -e 's|^ephemeral|/dev/nvme|')
-        if [ -e "${path}n1" ]; then
-            EPHEMERAL_DEVICES+=" ${path}n1"
-        fi
-    fi
-done
+while read -r device value; do
+    case "${value}" in
+      *"Block Store"*)
+         if [[ "${ROOT_DEVICE}" != "${device}"* ]]; then
+             EBS+=(${device})
+         fi
+      ;;
+      *"Instance Storage"*)
+         if [[ "${ROOT_DEVICE}" != "${device}"* ]]; then
+             EPHEMERAL_DEVICES+=(${device})
+         fi
+      ;;
+    esac
+done <<< "$(lsblk -l -p -io NAME,VENDOR,MODEL | grep Amazon | sort )"
 
-
-if [ "$EPHEMERAL_DEVICES" != "" ]; then
+if [ ! -z "${EPHEMERAL_DEVICES[@]}" ] ; then
 
     while true; do
         if [ -e /etc/init.d/docker ] ; then
@@ -264,21 +320,21 @@ if [ "$EPHEMERAL_DEVICES" != "" ]; then
             killall docker-containerd || true
         fi
 
-        if pvcreate -y --dataalignment 1m $EPHEMERAL_DEVICES ; then
+        if pvcreate -y --dataalignment 1m ${EPHEMERAL_DEVICES[@]} ; then
             break
         else
             sleep 1
         fi
     done
 
-    vgcreate VolGroup01 $EPHEMERAL_DEVICES
-    lvcreate -i $(echo ${EPHEMERAL_DEVICES} | wc -w) -l +100%FREE VolGroup01 -n ephemeralvol
+    vgcreate VolGroup01 ${EPHEMERAL_DEVICES[@]}
+    lvcreate -i $(echo ${EPHEMERAL_DEVICES[@]} | wc -w) -l +100%FREE VolGroup01 -n ephemeralvol
 fi
 """
 
 BASIC_INIT = INIT_EPHEMERALS + """
-pvcreate -y --dataalignment 1m /dev/xvdg
-vgcreate VolGroup00 /dev/xvdg
+pvcreate -y --dataalignment 1m ${EBS[@]}
+vgcreate VolGroup00 ${EBS[@]}
 lvcreate -i 1 -l +100%FREE VolGroup00 -n datavol
 """
 
@@ -311,7 +367,7 @@ EBS_FORMAT_INIT = BASIC_INIT + """
 mkfs.ext4 /dev/VolGroup00/datavol
 mount /dev/VolGroup00/datavol /mnt/
 
-if [ "$EPHEMERAL_DEVICES" != "" ]; then
+if [ ! -z "${EPHEMERAL_DEVICES[@]}" ]; then
     mkdir /scratch
     mkfs.ext4 /dev/VolGroup01/ephemeralvol
     mount /dev/VolGroup01/ephemeralvol /scratch/
@@ -429,8 +485,8 @@ def find_instance(client, tags, partId):
 
     response = client.describe_instances(Filters=[
         {
-            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+            'Name': 'tag:' + config.OWNER_TAG_NAME(),
+            'Values': [tags[config.OWNER_TAG_NAME()]]
         }
     ])
 
@@ -499,8 +555,8 @@ def ssh(tags, partId):
 
     response = client.describe_instances(Filters=[
         {
-            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+            'Name': 'tag:' + config.OWNER_TAG_NAME(),
+            'Values': [tags[config.OWNER_TAG_NAME()]]
         }
     ])
 
@@ -515,7 +571,7 @@ def ssh(tags, partId):
             name = instance_name(inst)
 
             if partId in inst['InstanceId'] or (name and partId in name):
-                dns = get_instance_ssh_address(inst)
+                dns = get_instance_addr(inst)
                 key = inst['KeyName']
                 try:
                     keys = subprocess.check_output(["ssh-add", "-l"]).decode().splitlines()
@@ -527,9 +583,9 @@ def ssh(tags, partId):
                     print_('WARNING: You don\' seem to have key %s in your ssh agent' % key, style='bold')
 
                 if hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
-                    os.execv('/bin/bash', ['/bin/bash', '-c', 'ssh %s %s@%s' % (CONFIG_SSH_FLAGS, CONFIG_SSH_USER, dns)])
+                    os.execv('/bin/bash', ['/bin/bash', '-c', 'ssh %s %s@%s' % (config.SSH_FLAGS(), config.SSH_USER(), dns)])
                 else:
-                    print_('%s@%s' % (CONFIG_SSH_USER, dns), file=sys.stdout)
+                    print_('%s %s@%s' % (config.SSH_FLAGS(), config.SSH_USER(), dns), file=sys.stdout)
                 sys.exit(0)
 
     print_('Instance id not found: %s. Try getbox list to see the list of instances' % partId, style='error')
@@ -547,8 +603,8 @@ def keep_ebs(tags, ebs_id_prefixes, keep=True):
     client = boto3.client('ec2')
     response = client.describe_volumes(Filters=[
         {
-            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+            'Name': 'tag:' + config.OWNER_TAG_NAME(),
+            'Values': [tags[config.OWNER_TAG_NAME()]]
         }
     ])
 
@@ -608,8 +664,8 @@ def list_volumes(tags, names_only=False):
 
     response = client.describe_volumes(Filters=[
         {
-            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-            'Values': [tags[CONFIG_OWNER_TAG_NAME]]}
+            'Name': 'tag:' + config.OWNER_TAG_NAME(),
+            'Values': [tags[config.OWNER_TAG_NAME()]]}
     ])
 
     if response['Volumes']:
@@ -663,15 +719,15 @@ def instance_table_row(inst):
             inst['InstanceType'],
             inst['LaunchTime'].strftime('%Y-%m-%d %H:%M'),
             ebs_desc(inst),
-            get_instance_ssh_address(inst))
+            get_instance_addr(inst))
 
 
 def list_instances(tags, block_device_name='/dev/sdg', names_only=False):
     client = boto3.client('ec2')
     response = client.describe_instances(Filters=[
         {
-            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+            'Name': 'tag:' + config.OWNER_TAG_NAME(),
+            'Values': [tags[config.OWNER_TAG_NAME()]]
         }
     ])
 
@@ -697,34 +753,60 @@ def list_instances(tags, block_device_name='/dev/sdg', names_only=False):
         table_footer()
 
 
+def try_connect(host):
+    try:
+        sock = socket.create_connection((host, 22), timeout=1)
+        sock.close()
+        return True
+    except socket.timeout:
+        return False
+    except socket.error as e:
+        if e.errno != errno.ECONNREFUSED:
+            raise e
+        else:
+            return False
+
+
+def try_connect_ssh(host):
+    try:
+        extra_flags = '-o ConnectTimeout=2'
+        subprocess.check_output(['/bin/bash',
+                                 '-c',
+                                 'ssh %s %s %s@%s exit' % (config.SSH_FLAGS(),
+                                                           extra_flags,
+                                                           config.SSH_USER(),
+                                                           host)])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
 def wait_for_ssh(client, dnsName):
     spin = Spinner("Waiting for ssh %s.. " % dnsName)
     spin.tick()
     t_start = time.time()
 
     while True:
-        if time.time() - t_start > CONFIG_SSH_WAIT_TIMEOUT_SECONDS:
+        if time.time() - t_start > config.SSH_WAIT_TIMEOUT_SECONDS():
             spin.done()
             print_("Failed to connect to %s" % dnsName, style='error')
             sys.exit(1)
 
         try:
-            sock = socket.create_connection((dnsName, 22), timeout=1)
-            sock.close()
-            spin.done()
-            return
-        except socket.timeout as e:
-            time.sleep(1)
-            spin.tick()
-
-        except socket.error as e:
-            if e.errno != errno.ECONNREFUSED:
+            if try_connect_ssh(dnsName):
                 spin.done()
-                print_("Failed to connect: %s" % e, style='error')
-                sys.exit(1)
+                return
             else:
                 time.sleep(1)
                 spin.tick()
+        except Exception as e:
+            spin.done()
+            print_("Failed to connect: %s" % e, style='error')
+            sys.exit(1)
+
+
+def get_instance_addr(inst):
+    return inst['PublicDnsName'] or inst['PrivateIpAddress']
 
 
 def wait_for_init(client, instanceId):
@@ -741,7 +823,7 @@ def wait_for_init(client, instanceId):
                     break
                 elif st == 'running':
                     spin.done()
-                    return get_instance_ssh_address(inst)
+                    return get_instance_addr(inst)
                 elif st == 'terminated':
                     spin.done("failed")
                     sys.exit(1)
@@ -753,8 +835,8 @@ def wait_for_init(client, instanceId):
 def get_detached_ebs_vol(client, tags, ebs_id_prefix):
     response = client.describe_volumes(Filters=[
         {
-            'Name': 'tag:' + CONFIG_OWNER_TAG_NAME,
-            'Values': [tags[CONFIG_OWNER_TAG_NAME]]
+            'Name': 'tag:' + config.OWNER_TAG_NAME(),
+            'Values': [tags[config.OWNER_TAG_NAME()]]
         }
     ])
 
@@ -798,17 +880,17 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
 
     launchSpec = {
         'ImageId': get_ami_id(instance_type),
-        'KeyName': CONFIG_SSH_KEY_NAME,
+        'KeyName': config.SSH_KEY_NAME(),
         'InstanceType': instance_type,
-        'SubnetId': random.choice(list(CONFIG_SUBNETS.values())),
+        'SubnetId': random.choice(list(config.SUBNETS().values())),
         'EbsOptimized': is_ebs_optimized_type(instance_type),
         'IamInstanceProfile': {
-            'Arn': CONFIG_IAM_ROLE_ARN,
+            'Arn': config.IAM_ROLE_ARN(),
         },
         'Monitoring': {
             'Enabled': True
         },
-        'SecurityGroupIds': CONFIG_SECURITY_GROUPS
+        'SecurityGroupIds': config.SECURITY_GROUPS()
     }
 
     try:
@@ -832,7 +914,7 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
         combined_message = MIMEMultipart()
-        contents = (init + "\n" + "\n".join(CONFIG_EXTRA_INIT_COMMANDS)).encode()
+        contents = (init + "\n" + "\n".join(config.EXTRA_INIT_COMMANDS())).encode()
         filename = 'init.sh'
         sub_message = MIMEText(contents, 'text/x-shellscript', sys.getdefaultencoding())
         sub_message.add_header('Content-Disposition', 'attachment; filename="%s"' % (filename,))
@@ -844,7 +926,7 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
         init = EBS_MIRROR_ATTACH_INIT if mirror else EBS_ATTACH_INIT
         ebs_vol_id, zone = vol['VolumeId'], vol['AvailabilityZone']
         launchSpec['UserData'] = build_userdata(init)
-        launchSpec['SubnetId'] = CONFIG_SUBNETS[zone]
+        launchSpec['SubnetId'] = config.SUBNETS()[zone]
     else:
         # create new EBS
         ebs_vol_id = None
@@ -856,13 +938,13 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
                 'Ebs': {
                     'VolumeSize': volume_size or 100,
                     'DeleteOnTermination': not keep,
-                    'VolumeType': CONFIG_EBS_VOLTYPE
+                    'VolumeType': config.EBS_VOLTYPE()
                 }
             }
         ]
 
-        if CONFIG_EBS_IOPS:
-            launchSpec['BlockDeviceMappings'][0]['Ebs']['Iops'] = CONFIG_EBS_IOPS
+        if config.EBS_IOPS():
+            launchSpec['BlockDeviceMappings'][0]['Ebs']['Iops'] = config.EBS_IOPS()
 
     # skip /dev/sdg since we're using it for EBS (not tested on d2.8xl)
     drive_names = ['/dev/sd' + chr(ord('b') + i) for i in range(25) if i != 5]
@@ -873,7 +955,7 @@ def get_inst(instance_type, tags, ebs_id_prefix, volume_size=None,
     # root volume
     launchSpec['BlockDeviceMappings'].append({
         'DeviceName': '/dev/sda1',
-        'Ebs': {'VolumeSize': CONFIG_ROOT_SIZE_GB,
+        'Ebs': {'VolumeSize': config.ROOT_SIZE_GB(),
                 'DeleteOnTermination': True,
                 'VolumeType': 'gp2'
                 }
@@ -911,8 +993,8 @@ def do_get_spot(client, launchSpec, tags, name, ebs_vol_id, mirror, instance_typ
         }
     }
 
-    if CONFIG_SPOT_PRICE:
-        instanceMarketOptions['SpotOptions']['MaxPrice'] = str(CONFIG_SPOT_PRICE)
+    if config.SPOT_PRICE():
+        instanceMarketOptions['SpotOptions']['MaxPrice'] = str(config.SPOT_PRICE())
 
     response = client.run_instances(
         TagSpecifications=[
@@ -1018,13 +1100,22 @@ def print_usage(f=sys.stdout):
 
 
 def get_owner():
-    return getpass.getuser()
+    if config.OWNER():
+        return config.OWNER()
+    else:
+        return getpass.getuser()
 
 
 def get_tags():
-    tt = {k: v for k, v in CONFIG_EXTRA_TAGS.items()}
-    tt[CONFIG_OWNER_TAG_NAME] = get_owner()
+    tt = {k: v for k, v in config.EXTRA_TAGS().items()}
+    tt[config.OWNER_TAG_NAME()] = get_owner()
     return tt
+
+
+def check_config():
+    check_creds()
+    config.validate()
+    config.maybe_save()
 
 
 def check_creds():
@@ -1078,11 +1169,11 @@ def valid_instance_type(s):
 
 
 def parse_size(s):
-    m = re.match('^(\d+)(G|GB)$', s)
+    m = re.match(r'^(\d+)(G|GB)$', s)
     if m:
         return int(m.group(1))
 
-    m = re.match('^(\d+)(T|TB)$', s)
+    m = re.match(r'^(\d+)(T|TB)$', s)
     if m:
         return int(m.group(1)) * 1000
 
@@ -1107,7 +1198,7 @@ def main():
         install_comp()
         print_('Installed at %s' % bin_path, style='success')
     elif p.cmd == 'get':
-        check_creds()
+        check_config()
         type_ = None
 
         vol_prefix = None
@@ -1139,14 +1230,14 @@ def main():
             sys.exit(1)
         rename_instance(get_tags(), p.args[0], p.args[1])
     elif p.cmd == 'ssh':
-        check_creds()
+        check_config()
         if len(p.args) != 1:
             print_('Usage: ssh <instance-id>', style='error')
             sys.exit(1)
         else:
             ssh(get_tags(), p.args[0])
     elif p.cmd == 'kill':
-        check_creds()
+        check_config()
         if len(p.args) != 1:
             print_('Usage: kill <instance-or-volume-id>', style='error')
             sys.exit(1)
@@ -1161,21 +1252,21 @@ def main():
             else:
                 kill_volume(get_tags(), vol_prefix)
     elif p.cmd == 'keep':
-        check_creds()
+        check_config()
         if len(p.args) < 1:
             print_('Usage: keep <ebs-id>', style='error')
             sys.exit(1)
         else:
             keep_ebs(get_tags(), p.args[0:], True)
     elif p.cmd in ('unkeep', 'dontkeep'):
-        check_creds()
+        check_config()
         if len(p.args) < 1:
             print_('Usage: unkeep <ebs-id>', style='error')
             sys.exit(1)
         else:
             keep_ebs(get_tags(), p.args[0:], False)
     elif p.cmd in ('list', 'ls'):
-        check_creds()
+        check_config()
         if p.only:
             obj_types = p.only.split(',')
         else:
