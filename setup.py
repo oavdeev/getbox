@@ -1,10 +1,9 @@
-#from distutils.core import setup
 from setuptools import setup
 
 
 setup(
     name='getbox',
-    version='0.7.7',
+    version='0.8.0',
     scripts=['bin/getbox'],
     author='Oleg Avdeev',
     author_email='feedback@instaguide.io',
